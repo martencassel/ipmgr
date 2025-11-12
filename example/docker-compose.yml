@@ -1,0 +1,15 @@
+services:
+  nginx1:
+    image: nginx:latest
+    ports:
+      - ${DEMO_IP1}:80:80
+
+  nginx2:
+    image: nginx:latest
+    ports:
+      - ${DEMO_IP2}:80:80
+
+  nginx3:
+    image: nginx:latest
+    ports:
+      - ${DEMO_IP3}:80:80

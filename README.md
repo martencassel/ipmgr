@@ -1,1 +1,212 @@
 # ipmgr
+
+**ipmgr** is a lightweight command-line tool for managing IP address allocations on network interfaces. It helps you allocate, track, and manage IP addresses across multiple network interfaces with a simple and intuitive interface.
+
+## Features
+
+✨ **Easy IP Management**
+- Allocate IPs from a pool automatically
+- Add specific IPs to interfaces
+- Release IPs when no longer needed
+- List allocations per interface or globally
+
+🎨 **Beautiful CLI**
+- Colorful output for better readability
+- Clean, organized layouts
+- Progress indicators and status messages
+
+📊 **State Tracking**
+- Persistent state storage
+- Track all IP allocations across reboots
+- Export allocations as environment variables
+
+## Installation
+
+### Quick Install
+
+```bash
+# Clone the repository
+git clone https://github.com/martencassel/ipmgr.git
+cd ipmgr
+
+# Make the script executable
+chmod +x ipmgr
+
+# (Optional) Install to your PATH
+sudo cp ipmgr /usr/local/bin/
+```
+
+### Manual Installation
+
+1. Download the `ipmgr` script
+2. Make it executable: `chmod +x ipmgr`
+3. Run it directly: `./ipmgr` or move it to a directory in your `$PATH`
+
+## Requirements
+
+- Bash shell
+- `sudo` access (for adding/removing IPs from network interfaces)
+- Linux system with `ip` command available
+
+## Usage
+
+### Basic Commands
+
+```bash
+# Show help
+ipmgr
+
+# Allocate next free IP from a pool
+ipmgr alloc --pool 192.168.1.10-192.168.1.20 --iface eth0
+
+# Add a specific IP to an interface
+ipmgr add 10.0.0.5 --iface eth1
+
+# List IPs for a specific interface
+ipmgr list --iface eth0
+
+# List all IPs grouped by interface
+ipmgr list-all
+
+# Release an IP from an interface
+ipmgr release 192.168.1.10 --iface eth0
+
+# Export IPs as environment variables
+eval $(ipmgr render-env --iface eth0 --prefix MYAPP)
+```
+
+## Examples
+
+### Allocating IPs from a Pool
+
+```bash
+# Allocate the next free IP from the pool to eth0
+$ ipmgr alloc --pool 192.168.1.10-192.168.1.20 --iface eth0
+✓ Allocated 192.168.1.10 on eth0
+
+# Allocate another IP
+$ ipmgr alloc --pool 192.168.1.10-192.168.1.20 --iface eth0
+✓ Allocated 192.168.1.11 on eth0
+```
+
+### Adding Specific IPs
+
+```bash
+# Add a specific IP to an interface
+$ ipmgr add 10.0.0.5 --iface eth1
+✓ Allocated 10.0.0.5 on eth1
+```
+
+### Listing Allocations
+
+```bash
+# List IPs for a specific interface
+$ ipmgr list --iface eth0
+Interface: eth0
+────────────────────────────
+  192.168.1.10
+  192.168.1.11
+  (2 IP(s) allocated)
+
+# List all IPs across all interfaces
+$ ipmgr list-all
+
+  IP Allocations by Interface
+
+┌─ Interface: eth0
+│  192.168.1.10
+│  192.168.1.11
+└─ 2 IP(s)
+
+┌─ Interface: eth1
+│  10.0.0.5
+└─ 1 IP(s)
+
+═══════════════════════════════
+Summary: 2 interface(s), 3 IP(s) total
+```
+
+### Releasing IPs
+
+```bash
+# Release an IP from an interface
+$ ipmgr release 192.168.1.10 --iface eth0
+✓ Released 192.168.1.10 from eth0
+```
+
+### Environment Variable Export
+
+```bash
+# Export IPs as environment variables
+$ ipmgr render-env --iface eth0 --prefix MYAPP
+MYAPP_IP1=192.168.1.10
+MYAPP_IP2=192.168.1.11
+
+# Use eval to export them to your shell
+$ eval $(ipmgr render-env --iface eth0 --prefix MYAPP)
+$ echo $MYAPP_IP1
+192.168.1.10
+```
+
+## State File
+
+All IP allocations are stored in `~/.ipmgr_state`. This file persists across system reboots and allows you to track which IPs are allocated to which interfaces.
+
+Format: `<interface> <ip_address>`
+
+Example:
+```
+eth0 192.168.1.10
+eth0 192.168.1.11
+eth1 10.0.0.5
+```
+
+## Docker Example
+
+See the `example/` directory for a complete Docker Compose setup demonstrating how to use ipmgr in a containerized environment.
+
+## Use Cases
+
+- **Container Networking**: Allocate IPs for Docker containers or VMs
+- **Testing Environments**: Quickly set up multiple IPs for testing
+- **Service Deployment**: Manage IPs for multiple services on different interfaces
+- **Development**: Create isolated network environments
+
+## Troubleshooting
+
+### Permission Denied
+
+If you get permission errors, ensure:
+1. The script is executable: `chmod +x ipmgr`
+2. You have sudo access (required for `ip addr add/del` commands)
+
+### No Such Device
+
+If you get "Cannot find device" errors:
+- Verify the network interface exists: `ip link show`
+- Use the correct interface name (e.g., `eth0`, `enp0s3`, `docker0`)
+
+### IPs Not Persisting
+
+IP addresses added by `ipmgr` will persist until:
+- They are explicitly released with `ipmgr release`
+- The network interface is brought down
+- The system is rebooted (depending on your network configuration)
+
+For permanent IP configuration, consider using your system's network management tools.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+MIT License - feel free to use this tool in your projects!
+
+## Author
+
+Mårten Cassel
+
+---
+
+**Note**: This tool directly modifies network interfaces using the `ip` command. Always test in a safe environment before using in production.

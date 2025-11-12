@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+
+STATE_FILE="$HOME/.ipmgr_state"
+
+# Colors
+RESET='\033[0m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[0;37m'
+BG_BLUE='\033[44m'
+BG_GREEN='\033[42m'
+
+# Ensure state file exists
+touch "$STATE_FILE"
+
+usage() {
+  echo -e ""
+  echo -e "${BOLD}${BG_BLUE}${WHITE}  ipmgr - IP Address Manager  ${RESET}"
+  echo -e ""
+  echo -e "${BOLD}${BLUE}USAGE:${RESET}"
+  echo -e "  ${BOLD}ipmgr${RESET} ${GREEN}<command>${RESET} ${CYAN}[options]${RESET}"
+  echo -e ""
+  echo -e "${BOLD}${BLUE}COMMANDS:${RESET}"
+  echo -e "  ${GREEN}alloc${RESET}           Allocate next free IP from a pool"
+  echo -e "                  ${CYAN}--pool${RESET} ${YELLOW}<start-end>${RESET}  IP range (e.g., 192.168.1.10-192.168.1.20)"
+  echo -e "                  ${CYAN}--iface${RESET} ${YELLOW}<iface>${RESET}      Network interface (e.g., eth0)"
+  echo -e ""
+  echo -e "  ${GREEN}add${RESET}             Add a specific IP to an interface"
+  echo -e "                  ${YELLOW}<ip>${RESET}              IP address to add"
+  echo -e "                  ${CYAN}--iface${RESET} ${YELLOW}<iface>${RESET}      Network interface"
+  echo -e ""
+  echo -e "  ${GREEN}release${RESET}         Release an IP from an interface"
+  echo -e "                  ${YELLOW}<ip>${RESET}              IP address to release"
+  echo -e "                  ${CYAN}--iface${RESET} ${YELLOW}<iface>${RESET}      Network interface"
+  echo -e ""
+  echo -e "  ${GREEN}list${RESET}            List IPs for a specific interface"
+  echo -e "                  ${CYAN}--iface${RESET} ${YELLOW}<iface>${RESET}      Network interface"
+  echo -e ""
+  echo -e "  ${GREEN}list-all${RESET}        List all IPs grouped by interface"
+  echo -e ""
+  echo -e "  ${GREEN}render-env${RESET}      Export IPs as environment variables"
+  echo -e "                  ${CYAN}--iface${RESET} ${YELLOW}<iface>${RESET}      Network interface"
+  echo -e "                  ${CYAN}--prefix${RESET} ${YELLOW}<PREFIX>${RESET}    Variable prefix (default: IPMGR)"
+  echo -e ""
+  echo -e "${BOLD}${BLUE}EXAMPLES:${RESET}"
+  echo -e "  ${DIM}# Allocate next free IP from pool${RESET}"
+  echo -e "  \$ ipmgr alloc --pool 192.168.1.10-192.168.1.20 --iface eth0"
+  echo -e ""
+  echo -e "  ${DIM}# Add specific IP${RESET}"
+  echo -e "  \$ ipmgr add 10.0.0.5 --iface eth1"
+  echo -e ""
+  echo -e "  ${DIM}# List all allocations${RESET}"
+  echo -e "  \$ ipmgr list-all"
+  echo -e ""
+  echo -e "  ${DIM}# Release an IP${RESET}"
+  echo -e "  \$ ipmgr release 192.168.1.10 --iface eth0"
+  echo -e ""
+  echo -e "  ${DIM}# Export as env vars${RESET}"
+  echo -e "  \$ eval \$(ipmgr render-env --iface eth0 --prefix MYAPP)"
+  echo -e ""
+  echo -e "${BOLD}${BLUE}STATE FILE:${RESET}"
+  echo -e "  ${DIM}Allocations are stored in:${RESET} ${CYAN}~/.ipmgr_state${RESET}"
+  echo -e ""
+  exit 1
+}
+
+# Helper: add IP to iface
+add_ip() {
+  local ip=$1
+  local iface=$2
+  sudo ip addr add "$ip/32" dev "$iface"
+  echo "$iface $ip" >> "$STATE_FILE"
+  echo -e "${GREEN}✓${RESET} Allocated ${CYAN}${ip}${RESET} on ${YELLOW}${iface}${RESET}"
+}
+
+# Helper: release IP from iface
+release_ip() {
+  local ip=$1
+  local iface=$2
+  sudo ip addr del "$ip/32" dev "$iface"
+  sed -i "/^$iface $ip$/d" "$STATE_FILE"
+  echo -e "${GREEN}✓${RESET} Released ${CYAN}${ip}${RESET} from ${YELLOW}${iface}${RESET}"
+}
+
+# Helper: allocate next free IP from pool
+alloc_ip() {
+  local pool=$1
+  local iface=$2
+  local start=$(echo "$pool" | cut -d- -f1)
+  local end=$(echo "$pool" | cut -d- -f2)
+
+  IFS=. read -r s1 s2 s3 s4 <<< "$start"
+  IFS=. read -r e1 e2 e3 e4 <<< "$end"
+
+  for ((i=s4; i<=e4; i++)); do
+    candidate="$s1.$s2.$s3.$i"
+    if ! grep -q "$iface $candidate" "$STATE_FILE"; then
+      add_ip "$candidate" "$iface"
+      return
+    fi
+  done
+  echo -e "${RED}✗${RESET} No free IPs in pool ${MAGENTA}${pool}${RESET}"
+}
+
+# Helper: list allocations
+list_ips() {
+  local iface=$1
+  local ips=$(grep "^$iface " "$STATE_FILE")
+
+  if [ -z "$ips" ]; then
+    echo -e "${DIM}No allocations for ${YELLOW}${iface}${RESET}"
+    return
+  fi
+
+  echo -e "${BOLD}${BLUE}Interface: ${YELLOW}${iface}${RESET}"
+  echo -e "${DIM}────────────────────────────${RESET}"
+  echo "$ips" | awk -v cyan="$CYAN" -v reset="$RESET" '{printf "  %s%s%s\n", cyan, $2, reset}'
+  local count=$(echo "$ips" | wc -l)
+  echo -e "${DIM}  (${count} IP(s) allocated)${RESET}"
+}
+
+# Helper: list all allocations grouped by interface
+list_all_ips() {
+  if [ ! -s "$STATE_FILE" ]; then
+    echo -e "${DIM}No allocations found${RESET}"
+    return
+  fi
+
+  # Get unique interfaces
+  local ifaces=$(awk '{print $1}' "$STATE_FILE" | sort -u)
+
+  if [ -z "$ifaces" ]; then
+    echo -e "${DIM}No allocations found${RESET}"
+    return
+  fi
+
+  # Header
+  echo ""
+  echo -e "${BOLD}${BG_BLUE}${WHITE}  IP Allocations by Interface  ${RESET}"
+  echo ""
+
+  local total_ips=0
+  local iface_count=0
+
+  while IFS= read -r iface; do
+    ((iface_count++))
+    echo -e "${BOLD}${BLUE}┌─ Interface: ${YELLOW}${iface}${RESET}"
+
+    local ips=$(grep "^$iface " "$STATE_FILE")
+    local count=$(echo "$ips" | wc -l)
+    total_ips=$((total_ips + count))
+
+    echo "$ips" | awk -v cyan="$CYAN" -v reset="$RESET" -v blue="$BLUE" '{printf "%s│%s  %s%s%s\n", blue, reset, cyan, $2, reset}'
+
+    echo -e "${BLUE}└─${RESET} ${DIM}${count} IP(s)${RESET}"
+    echo ""
+  done <<< "$ifaces"
+
+  # Footer summary
+  echo -e "${DIM}═══════════════════════════════${RESET}"
+  echo -e "${BOLD}Summary:${RESET} ${GREEN}${iface_count}${RESET} interface(s), ${GREEN}${total_ips}${RESET} IP(s) total"
+  echo ""
+}
+
+# Helper: render allocations as env vars
+render_env() {
+  local iface=$1
+  local prefix=${2:-IPMGR}
+  local i=1
+
+  while read -r line; do
+    ip=$(echo "$line" | awk '{print $2}')
+    echo "${prefix}_IP${i}=$ip"
+    ((i++))
+  done < <(grep "^$iface " "$STATE_FILE")
+}
+
+# Parse command
+cmd=$1
+shift
+
+case "$cmd" in
+  alloc)
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --pool) pool=$2; shift 2 ;;
+        --iface) iface=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    [[ -z "$pool" || -z "$iface" ]] && usage
+    alloc_ip "$pool" "$iface"
+    ;;
+  add)
+    ip=$1; shift
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --iface) iface=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    [[ -z "$ip" || -z "$iface" ]] && usage
+    add_ip "$ip" "$iface"
+    ;;
+  release)
+    ip=$1; shift
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --iface) iface=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    [[ -z "$ip" || -z "$iface" ]] && usage
+    release_ip "$ip" "$iface"
+    ;;
+  list)
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --iface) iface=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    [[ -z "$iface" ]] && usage
+    list_ips "$iface"
+    ;;
+  list-all)
+    list_all_ips
+    ;;
+  render-env)
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --iface) iface=$2; shift 2 ;;
+        --prefix) prefix=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    [[ -z "$iface" ]] && usage
+    render_env "$iface" "$prefix"
+    ;;
+  *)
+    usage
+    ;;
+esac
