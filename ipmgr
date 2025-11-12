@@ -19,6 +19,17 @@ BG_GREEN='\033[42m'
 # Ensure state file exists
 touch "$STATE_FILE"
 
+# Helper: validate interface exists
+validate_iface() {
+  local iface=$1
+  if ! ip link show "$iface" &>/dev/null; then
+    echo -e "${RED}✗${RESET} Interface ${YELLOW}${iface}${RESET} does not exist"
+    echo -e "${DIM}Available interfaces:${RESET}"
+    ip -br link show | awk '{print "  " $1}' | grep -v "^  lo$"
+    exit 1
+  fi
+}
+
 usage() {
   echo -e ""
   echo -e "${BOLD}${BG_BLUE}${WHITE}  ipmgr - IP Address Manager  ${RESET}"
@@ -92,6 +103,7 @@ usage() {
 delete_pool() {
   local pool=$1
   local iface=$2
+  validate_iface "$iface"
   local start=$(echo "$pool" | cut -d- -f1)
   local end=$(echo "$pool" | cut -d- -f2)
 
@@ -137,6 +149,7 @@ cleanup_all() {
 add_ip() {
   local ip=$1
   local iface=$2
+  validate_iface "$iface"
   sudo ip addr add "$ip/32" dev "$iface"
   echo "$iface $ip" >> "$STATE_FILE"
   echo -e "${GREEN}✓${RESET} Allocated ${CYAN}${ip}${RESET} on ${YELLOW}${iface}${RESET}"
@@ -146,6 +159,7 @@ add_ip() {
 release_ip() {
   local ip=$1
   local iface=$2
+  validate_iface "$iface"
   sudo ip addr del "$ip/32" dev "$iface"
   sed -i "/^$iface $ip$/d" "$STATE_FILE"
   echo -e "${GREEN}✓${RESET} Released ${CYAN}${ip}${RESET} from ${YELLOW}${iface}${RESET}"
