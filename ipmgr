@@ -48,6 +48,15 @@ usage() {
   echo -e "                  ${CYAN}--iface${RESET} ${YELLOW}<iface>${RESET}      Network interface"
   echo -e "                  ${CYAN}--prefix${RESET} ${YELLOW}<PREFIX>${RESET}    Variable prefix (default: IPMGR)"
   echo -e ""
+  echo -e "  ${GREEN}sync${RESET}            Re-apply missing IPs from state file"
+  echo -e "                  ${DIM}Ensures system interfaces match allocations in state file${RESET}"
+  echo -e ""
+  echo -e "  ${GREEN}delete-pool${RESET}     Delete all IPs in a pool"
+  echo -e "                  ${CYAN}--pool${RESET} ${YELLOW}<start-end>${RESET}  IP range"
+  echo -e "                  ${CYAN}--iface${RESET} ${YELLOW}<iface>${RESET}      Network interface"
+  echo -e ""
+  echo -e "  ${GREEN}cleanup${RESET}         Remove all allocations and clear state file"
+  echo -e ""
   echo -e "${BOLD}${BLUE}EXAMPLES:${RESET}"
   echo -e "  ${DIM}# Allocate next free IP from pool${RESET}"
   echo -e "  \$ ipmgr alloc --pool 192.168.1.10-192.168.1.20 --iface eth0"
@@ -64,11 +73,65 @@ usage() {
   echo -e "  ${DIM}# Export as env vars${RESET}"
   echo -e "  \$ eval \$(ipmgr render-env --iface eth0 --prefix MYAPP)"
   echo -e ""
+  echo -e "  ${DIM}# Sync state with system${RESET}"
+  echo -e "  \$ ipmgr sync"
+  echo -e ""
+  echo -e "  ${DIM}# Delete a pool${RESET}"
+  echo -e "  \$ ipmgr delete-pool --pool 192.168.1.10-192.168.1.20 --iface eth0"
+  echo -e ""
+  echo -e "  ${DIM}# Cleanup everything${RESET}"
+  echo -e "  \$ ipmgr cleanup"
+  echo -e ""
   echo -e "${BOLD}${BLUE}STATE FILE:${RESET}"
   echo -e "  ${DIM}Allocations are stored in:${RESET} ${CYAN}~/.ipmgr_state${RESET}"
   echo -e ""
   exit 1
 }
+
+# Helper: delete all IPs in a pool
+delete_pool() {
+  local pool=$1
+  local iface=$2
+  local start=$(echo "$pool" | cut -d- -f1)
+  local end=$(echo "$pool" | cut -d- -f2)
+
+  IFS=. read -r s1 s2 s3 s4 <<< "$start"
+  IFS=. read -r e1 e2 e3 e4 <<< "$end"
+
+  local deleted=0
+  for ((i=s4; i<=e4; i++)); do
+    candidate="$s1.$s2.$s3.$i"
+    if grep -q "^$iface $candidate$" "$STATE_FILE"; then
+      sudo ip addr del "$candidate/32" dev "$iface"
+      sed -i "/^$iface $candidate$/d" "$STATE_FILE"
+      echo -e "${GREEN}✓${RESET} Deleted ${CYAN}${candidate}${RESET} from ${YELLOW}${iface}${RESET}"
+      deleted=$((deleted+1))
+    fi
+  done
+
+  if [ "$deleted" -eq 0 ]; then
+    echo -e "${RED}✗${RESET} No IPs from pool ${MAGENTA}${pool}${RESET} found on ${YELLOW}${iface}${RESET}"
+  fi
+}
+
+# Helper: cleanup all allocations
+cleanup_all() {
+  if [ ! -s "$STATE_FILE" ]; then
+    echo -e "${DIM}No allocations to cleanup${RESET}"
+    return
+  fi
+
+  while read -r iface ip; do
+    sudo ip addr del "$ip/32" dev "$iface" 2>/dev/null
+    echo -e "${GREEN}✓${RESET} Removed ${CYAN}${ip}${RESET} from ${YELLOW}${iface}${RESET}"
+  done < "$STATE_FILE"
+
+  > "$STATE_FILE"
+  echo -e "${BOLD}${RED}All allocations cleared${RESET}"
+}
+
+
+
 
 # Helper: add IP to iface
 add_ip() {
@@ -181,6 +244,37 @@ render_env() {
   done < <(grep "^$iface " "$STATE_FILE")
 }
 
+# Helper: sync state file with actual system IPs
+sync_ips() {
+  local synced=0
+
+  # Loop through each entry in state file
+  while read -r iface ip; do
+    # Check if IP is actually assigned
+    if ! ip addr show dev "$iface" | grep -qw "$ip"; then
+      echo -e "${YELLOW}↺${RESET} Re-applying ${CYAN}${ip}${RESET} to ${YELLOW}${iface}${RESET}"
+      sudo ip addr add "$ip/32" dev "$iface"
+      synced=$((synced+1))
+    fi
+  done < "$STATE_FILE"
+
+  # Optionally: detect IPs on system but not in state file
+  for iface in $(awk '{print $1}' "$STATE_FILE" | sort -u); do
+    ip addr show dev "$iface" | grep -oP '(?<=inet )\d+\.\d+\.\d+\.\d+' | while read -r ip; do
+      if ! grep -q "^$iface $ip$" "$STATE_FILE"; then
+        echo -e "${MAGENTA}⚠${RESET} Found ${CYAN}${ip}${RESET} on ${YELLOW}${iface}${RESET} not in state file"
+        # Uncomment to auto-add:
+        # echo "$iface $ip" >> "$STATE_FILE"
+      fi
+    done
+  done
+
+  if [ "$synced" -eq 0 ]; then
+    echo -e "${GREEN}✓${RESET} All IPs are in sync"
+  fi
+}
+
+
 # Parse command
 cmd=$1
 shift
@@ -231,6 +325,23 @@ case "$cmd" in
     ;;
   list-all)
     list_all_ips
+    ;;
+  sync)
+    sync_ips
+    ;;
+  delete-pool)
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --pool) pool=$2; shift 2 ;;
+        --iface) iface=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    [[ -z "$pool" || -z "$iface" ]] && usage
+    delete_pool "$pool" "$iface"
+    ;;
+  cleanup)
+    cleanup_all
     ;;
   render-env)
     while [[ $# -gt 0 ]]; do

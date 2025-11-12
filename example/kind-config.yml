@@ -1,0 +1,27 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - containerPort: 80
+    hostPort: 8080
+    listenAddress: "${KIND_IP}"
+    protocol: TCP
+  - containerPort: 6443
+    hostPort: 5443
+    listenAddress: "${KIND_IP}"
+    protocol: TCP
+
+kubeadmConfigPatches:
+- |
+  kind: InitConfiguration
+  nodeRegistration:
+    kubeletExtraArgs:
+      node-ip: "0.0.0.0"
+- |
+  kind: ClusterConfiguration
+  apiServer:
+    certSANs:
+    - 127.0.0.1
+    - ${KIND_IP}
