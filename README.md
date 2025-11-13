@@ -10,6 +10,13 @@
 - Release IPs when no longer needed
 - List allocations per interface or globally
 
+📋 **Declarative Configuration**
+- Define desired state in YAML files
+- Apply configuration idempotently
+- Validate config before applying
+- Generate config from current state
+- Show diffs between config and reality
+
 🔍 **Subnet Detection & Validation**
 - Automatically detect interface subnets
 - Validate IPs against interface subnet
@@ -53,6 +60,8 @@ sudo cp ipmgr /usr/local/bin/
 - Bash shell
 - `sudo` access (for adding/removing IPs from network interfaces)
 - Linux system with `ip` command available
+- `yq` (optional, only required for YAML configuration features)
+  - Install: `brew install yq` (macOS) or `snap install yq` (Linux)
 
 ## Usage
 
@@ -82,6 +91,38 @@ ipmgr release 192.168.1.10 --iface eth0
 
 # Export IPs as environment variables
 eval $(ipmgr render-env --iface eth0 --prefix MYAPP)
+```
+
+### Declarative Configuration
+
+```bash
+# Generate a config file from current state
+ipmgr generate
+
+# Create or edit ipmgr.yaml with your desired state
+cat > ipmgr.yaml << 'EOF'
+interfaces:
+  - name: eth0
+    ips:
+      - 192.168.1.10
+      - 192.168.1.11
+  - name: docker0
+    ips:
+      - 172.17.0.100
+      - 172.17.0.101
+EOF
+
+# Validate the configuration
+ipmgr validate
+
+# Show what would change
+ipmgr diff
+
+# Apply the configuration
+ipmgr apply
+
+# Use a different config file
+ipmgr apply --config custom.yaml
 ```
 
 ## Examples
@@ -207,6 +248,153 @@ $ echo $MYAPP_IP1
 192.168.1.10
 ```
 
+### Declarative Configuration Workflow
+
+ipmgr supports a GitOps-style declarative workflow using YAML configuration files.
+
+#### 1. Generate Config from Current State
+
+```bash
+# Generate ipmgr.yaml from currently allocated IPs
+$ ipmgr generate
+✓ Generated config: ./ipmgr.yaml
+  2 interface(s), 5 IP(s)
+
+$ cat ipmgr.yaml
+# ipmgr configuration file
+# Generated from current state on Wed Nov 13 2025
+
+interfaces:
+  - name: docker0
+    ips:
+      - 172.17.0.10
+      - 172.17.0.11
+  - name: eth0
+    ips:
+      - 192.168.1.10
+      - 192.168.1.11
+      - 192.168.1.12
+```
+
+#### 2. Edit Your Desired State
+
+```bash
+# Edit ipmgr.yaml to define your desired state
+$ cat > ipmgr.yaml << 'EOF'
+interfaces:
+  - name: docker0
+    ips:
+      - 172.17.0.10
+      - 172.17.0.11
+      - 172.17.0.12  # Added new IP
+  - name: eth0
+    ips:
+      - 192.168.1.10
+      - 192.168.1.11
+      # Removed 192.168.1.12
+EOF
+```
+
+#### 3. Validate Configuration
+
+```bash
+$ ipmgr validate
+
+Validating ipmgr.yaml
+
+✓ YAML syntax valid
+✓ Found 2 interface(s)
+
+Interface: docker0
+  ✓ Interface exists
+  3 IP(s) defined
+
+Interface: eth0
+  ✓ Interface exists
+  2 IP(s) defined
+
+═══════════════════════════════
+✓ Validation passed
+  2 interface(s), 5 IP(s) defined
+```
+
+#### 4. Preview Changes
+
+```bash
+$ ipmgr diff
+
+Configuration Diff
+Shows what would change if config is applied
+
+To be added:
+  + docker0 172.17.0.12
+
+Not in config (would remain):
+  ○ eth0 192.168.1.12
+
+═══════════════════════════════
+Summary:
+  1 to be added
+  4 already present
+  1 not in config
+```
+
+#### 5. Apply Configuration
+
+```bash
+$ ipmgr apply
+
+Applying configuration from ipmgr.yaml
+
+Interface: docker0
+  ○ 172.17.0.10 (already allocated)
+  ○ 172.17.0.11 (already allocated)
+  ✓ 172.17.0.12 allocated
+
+Interface: eth0
+  ○ 192.168.1.10 (already allocated)
+  ○ 192.168.1.11 (already allocated)
+
+═══════════════════════════════
+Summary: 1 applied, 4 skipped, 0 failed
+```
+
+#### 6. Use in CI/CD
+
+```bash
+# In your deployment pipeline
+ipmgr validate --config production.yaml
+ipmgr diff --config production.yaml
+ipmgr apply --config production.yaml
+```
+
+### Managing Multiple Environments
+
+```bash
+# Development environment
+$ cat > ipmgr-dev.yaml << 'EOF'
+interfaces:
+  - name: docker0
+    ips:
+      - 172.17.0.100
+      - 172.17.0.101
+EOF
+
+# Production environment
+$ cat > ipmgr-prod.yaml << 'EOF'
+interfaces:
+  - name: eth0
+    ips:
+      - 192.168.1.100
+      - 192.168.1.101
+      - 192.168.1.102
+EOF
+
+# Apply specific environment
+$ ipmgr apply --config ipmgr-dev.yaml
+$ ipmgr apply --config ipmgr-prod.yaml
+```
+
 ## State File
 
 All IP allocations are stored in `~/.ipmgr_state`. This file persists across system reboots and allows you to track which IPs are allocated to which interfaces.
@@ -230,6 +418,8 @@ See the `example/` directory for a complete Docker Compose setup demonstrating h
 - **Testing Environments**: Quickly set up multiple IPs for testing
 - **Service Deployment**: Manage IPs for multiple services on different interfaces
 - **Development**: Create isolated network environments
+- **GitOps/IaC**: Define infrastructure as code with YAML configs
+- **CI/CD Pipelines**: Automate IP allocation in deployment workflows
 
 ## Troubleshooting
 

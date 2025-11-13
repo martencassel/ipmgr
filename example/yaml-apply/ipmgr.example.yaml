@@ -1,0 +1,36 @@
+# ipmgr declarative configuration example
+# This file defines the desired state of IP allocations across interfaces
+#
+# Usage:
+#   ipmgr validate --config ipmgr.yaml    # Check config validity
+#   ipmgr diff --config ipmgr.yaml        # Show what would change
+#   ipmgr apply --config ipmgr.yaml       # Apply the configuration
+#   ipmgr generate --config ipmgr.yaml    # Generate from current state
+
+interfaces:
+  # Primary network interface
+  - name: eth0
+    ips:
+      - 192.168.1.10
+      - 192.168.1.11
+      - 192.168.1.12
+
+  # Docker bridge network
+  - name: docker0
+    ips:
+      - 172.17.0.10
+      - 172.17.0.11
+      - 172.17.0.12
+      - 172.17.0.13
+
+  # Development/testing interface
+  - name: br-dev
+    ips:
+      - 10.0.0.100
+      - 10.0.0.101
+
+# Notes:
+# - All interfaces must exist before applying configuration
+# - IPs are assigned with /32 prefix (single host)
+# - Duplicate IPs are skipped automatically
+# - Use 'ipmgr show-iface --iface <name>' to see interface details and suggested pools
