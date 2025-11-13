@@ -30,6 +30,85 @@ validate_iface() {
   fi
 }
 
+# Helper: get interface subnet
+get_iface_subnet() {
+  local iface=$1
+  # Get the first IPv4 address and its CIDR
+  ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+/\d+' | head -1
+}
+
+# Helper: check if IP is in subnet
+ip_in_subnet() {
+  local ip=$1
+  local subnet=$2
+
+  if [ -z "$subnet" ]; then
+    return 1
+  fi
+
+  # Extract network and mask
+  local network=$(echo "$subnet" | cut -d/ -f1)
+  local mask=$(echo "$subnet" | cut -d/ -f2)
+
+  # Convert IP to integer
+  local IFS=.
+  read -r i1 i2 i3 i4 <<< "$ip"
+  local ip_int=$((i1 * 256**3 + i2 * 256**2 + i3 * 256 + i4))
+
+  # Convert network to integer
+  read -r n1 n2 n3 n4 <<< "$network"
+  local net_int=$((n1 * 256**3 + n2 * 256**2 + n3 * 256 + n4))
+
+  # Calculate network mask
+  local mask_int=$(( (0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF ))
+
+  # Check if IP is in subnet
+  if [ $(( ip_int & mask_int )) -eq $(( net_int & mask_int )) ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Helper: suggest valid pool range
+suggest_pool_range() {
+  local iface=$1
+  local subnet=$(get_iface_subnet "$iface")
+
+  if [ -z "$subnet" ]; then
+    echo -e "${YELLOW}⚠${RESET}  No IP configured on ${YELLOW}${iface}${RESET}"
+    echo -e "${DIM}  Configure an IP first or use a different interface${RESET}"
+    return
+  fi
+
+  local network=$(echo "$subnet" | cut -d/ -f1)
+  local mask=$(echo "$subnet" | cut -d/ -f2)
+
+  # Calculate network address and broadcast
+  IFS=. read -r n1 n2 n3 n4 <<< "$network"
+  local net_int=$((n1 * 256**3 + n2 * 256**2 + n3 * 256 + n4))
+  local mask_int=$(( (0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF ))
+  local network_addr=$(( net_int & mask_int ))
+  local broadcast_addr=$(( network_addr | ~mask_int & 0xFFFFFFFF ))
+
+  # Convert back to dotted notation
+  local net_n1=$(( (network_addr >> 24) & 0xFF ))
+  local net_n2=$(( (network_addr >> 16) & 0xFF ))
+  local net_n3=$(( (network_addr >> 8) & 0xFF ))
+  local net_n4=$(( network_addr & 0xFF ))
+
+  local bcast_n1=$(( (broadcast_addr >> 24) & 0xFF ))
+  local bcast_n2=$(( (broadcast_addr >> 16) & 0xFF ))
+  local bcast_n3=$(( (broadcast_addr >> 8) & 0xFF ))
+  local bcast_n4=$(( broadcast_addr & 0xFF ))
+
+  # Suggest a safe range (avoid network and broadcast addresses)
+  local start_ip="$net_n1.$net_n2.$net_n3.$((net_n4 + 10))"
+  local end_ip="$bcast_n1.$bcast_n2.$bcast_n3.$((bcast_n4 - 1))"
+
+  echo -e "${DIM}Interface subnet:${RESET} ${CYAN}${subnet}${RESET}"
+  echo -e "${DIM}Suggested pool:${RESET}   ${GREEN}${start_ip}-${end_ip}${RESET}"
+}
+
 usage() {
   echo -e ""
   echo -e "${BOLD}${BG_BLUE}${WHITE}  ipmgr - IP Address Manager  ${RESET}"
@@ -55,6 +134,9 @@ usage() {
   echo -e ""
   echo -e "  ${GREEN}list-all${RESET}        List all IPs grouped by interface"
   echo -e ""
+  echo -e "  ${GREEN}show-iface${RESET}      Show interface details and subnet information"
+  echo -e "                  ${CYAN}--iface${RESET} ${YELLOW}<iface>${RESET}      Network interface"
+  echo -e ""
   echo -e "  ${GREEN}render-env${RESET}      Export IPs as environment variables"
   echo -e "                  ${CYAN}--iface${RESET} ${YELLOW}<iface>${RESET}      Network interface"
   echo -e "                  ${CYAN}--prefix${RESET} ${YELLOW}<PREFIX>${RESET}    Variable prefix (default: IPMGR)"
@@ -77,6 +159,9 @@ usage() {
   echo -e ""
   echo -e "  ${DIM}# List all allocations${RESET}"
   echo -e "  \$ ipmgr list-all"
+  echo -e ""
+  echo -e "  ${DIM}# Show interface details and suggested pool${RESET}"
+  echo -e "  \$ ipmgr show-iface --iface docker0"
   echo -e ""
   echo -e "  ${DIM}# Release an IP${RESET}"
   echo -e "  \$ ipmgr release 192.168.1.10 --iface eth0"
@@ -149,8 +234,26 @@ cleanup_all() {
 add_ip() {
   local ip=$1
   local iface=$2
+  local skip_validation=${3:-false}
   validate_iface "$iface"
-  sudo ip addr add "$ip/32" dev "$iface"
+
+  # Validate IP is in subnet unless skipped
+  if [ "$skip_validation" != "true" ]; then
+    local subnet=$(get_iface_subnet "$iface")
+    if [ -n "$subnet" ] && ! ip_in_subnet "$ip" "$subnet"; then
+      echo -e "${RED}✗${RESET} IP ${CYAN}${ip}${RESET} is not in the subnet of ${YELLOW}${iface}${RESET}"
+      echo -e ""
+      suggest_pool_range "$iface"
+      return 1
+    fi
+  fi
+
+  sudo ip addr add "$ip/32" dev "$iface" 2>/dev/null
+  if [ $? -ne 0 ]; then
+    echo -e "${RED}✗${RESET} Failed to add ${CYAN}${ip}${RESET} to ${YELLOW}${iface}${RESET} (may already exist)"
+    return 1
+  fi
+
   echo "$iface $ip" >> "$STATE_FILE"
   echo -e "${GREEN}✓${RESET} Allocated ${CYAN}${ip}${RESET} on ${YELLOW}${iface}${RESET}"
 }
@@ -169,8 +272,20 @@ release_ip() {
 alloc_ip() {
   local pool=$1
   local iface=$2
+  validate_iface "$iface"
   local start=$(echo "$pool" | cut -d- -f1)
   local end=$(echo "$pool" | cut -d- -f2)
+
+  # Validate pool is in subnet
+  local subnet=$(get_iface_subnet "$iface")
+  if [ -n "$subnet" ]; then
+    if ! ip_in_subnet "$start" "$subnet" || ! ip_in_subnet "$end" "$subnet"; then
+      echo -e "${RED}✗${RESET} Pool ${MAGENTA}${pool}${RESET} is not in the subnet of ${YELLOW}${iface}${RESET}"
+      echo -e ""
+      suggest_pool_range "$iface"
+      return 1
+    fi
+  fi
 
   IFS=. read -r s1 s2 s3 s4 <<< "$start"
   IFS=. read -r e1 e2 e3 e4 <<< "$end"
@@ -178,7 +293,7 @@ alloc_ip() {
   for ((i=s4; i<=e4; i++)); do
     candidate="$s1.$s2.$s3.$i"
     if ! grep -q "$iface $candidate" "$STATE_FILE"; then
-      add_ip "$candidate" "$iface"
+      add_ip "$candidate" "$iface" true  # Skip validation since we already validated the pool
       return
     fi
   done
@@ -200,6 +315,121 @@ list_ips() {
   echo "$ips" | awk -v cyan="$CYAN" -v reset="$RESET" '{printf "  %s%s%s\n", cyan, $2, reset}'
   local count=$(echo "$ips" | wc -l)
   echo -e "${DIM}  (${count} IP(s) allocated)${RESET}"
+}
+
+# Helper: show interface details
+show_iface() {
+  local iface=$1
+  validate_iface "$iface"
+
+  echo ""
+  echo -e "${BOLD}${BG_BLUE}${WHITE}  Interface Details: ${YELLOW}${iface}${RESET}${WHITE}  ${RESET}"
+  echo ""
+
+  # Get interface status
+  local status=$(ip -br link show "$iface" | awk '{print $2}')
+  local status_color=$GREEN
+  if [ "$status" != "UP" ]; then
+    status_color=$RED
+  fi
+
+  echo -e "${BOLD}${BLUE}Status:${RESET} ${status_color}${status}${RESET}"
+  echo ""
+
+  # Get all IP addresses
+  local ip_info=$(ip -4 addr show "$iface" 2>/dev/null | grep "inet ")
+
+  if [ -z "$ip_info" ]; then
+    echo -e "${YELLOW}⚠${RESET}  ${DIM}No IPv4 addresses configured${RESET}"
+    echo ""
+    echo -e "${DIM}To add an IP address:${RESET}"
+    echo -e "  ${CYAN}sudo ip addr add <ip>/<mask> dev ${iface}${RESET}"
+    echo ""
+  else
+    echo -e "${BOLD}${BLUE}Configured Subnets:${RESET}"
+    echo ""
+
+    while IFS= read -r line; do
+      local cidr=$(echo "$line" | grep -oP '(?<=inet\\s)\\d+\\.\\d+\\.\\d+\\.\\d+/\\d+')
+      local scope=$(echo "$line" | grep -oP '(?<=scope\\s)\\w+')
+
+      if [ -n "$cidr" ]; then
+        local ip=$(echo "$cidr" | cut -d/ -f1)
+        local mask=$(echo "$cidr" | cut -d/ -f2)
+        echo -e "  ${CYAN}${cidr}${RESET} ${DIM}(scope: ${scope})${RESET}"
+
+        # Calculate usable range
+        IFS=. read -r n1 n2 n3 n4 <<< "$ip"
+        local net_int=$((n1 * 256**3 + n2 * 256**2 + n3 * 256 + n4))
+        local mask_int=$(( (0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF ))
+        local network_addr=$(( net_int & mask_int ))
+        local broadcast_addr=$(( network_addr | ~mask_int & 0xFFFFFFFF ))
+
+        local net_n1=$(( (network_addr >> 24) & 0xFF ))
+        local net_n2=$(( (network_addr >> 16) & 0xFF ))
+        local net_n3=$(( (network_addr >> 8) & 0xFF ))
+        local net_n4=$(( network_addr & 0xFF ))
+
+        local bcast_n1=$(( (broadcast_addr >> 24) & 0xFF ))
+        local bcast_n2=$(( (broadcast_addr >> 16) & 0xFF ))
+        local bcast_n3=$(( (broadcast_addr >> 8) & 0xFF ))
+        local bcast_n4=$(( broadcast_addr & 0xFF ))
+
+        local num_hosts=$(( (1 << (32 - mask)) - 2 ))
+
+        echo -e "  ${DIM}├─ Network:   ${net_n1}.${net_n2}.${net_n3}.${net_n4}${RESET}"
+        echo -e "  ${DIM}├─ Broadcast: ${bcast_n1}.${bcast_n2}.${bcast_n3}.${bcast_n4}${RESET}"
+        echo -e "  ${DIM}└─ Usable:    ~${num_hosts} hosts${RESET}"
+        echo ""
+      fi
+    done <<< "$ip_info"
+
+    # Suggest pool range
+    echo -e "${BOLD}${BLUE}Suggested Pool Range:${RESET}"
+    echo ""
+    local subnet=$(get_iface_subnet "$iface")
+    if [ -n "$subnet" ]; then
+      local network=$(echo "$subnet" | cut -d/ -f1)
+      local mask=$(echo "$subnet" | cut -d/ -f2)
+
+      IFS=. read -r n1 n2 n3 n4 <<< "$network"
+      local net_int=$((n1 * 256**3 + n2 * 256**2 + n3 * 256 + n4))
+      local mask_int=$(( (0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF ))
+      local network_addr=$(( net_int & mask_int ))
+      local broadcast_addr=$(( network_addr | ~mask_int & 0xFFFFFFFF ))
+
+      local net_n1=$(( (network_addr >> 24) & 0xFF ))
+      local net_n2=$(( (network_addr >> 16) & 0xFF ))
+      local net_n3=$(( (network_addr >> 8) & 0xFF ))
+      local net_n4=$(( network_addr & 0xFF ))
+
+      local bcast_n1=$(( (broadcast_addr >> 24) & 0xFF ))
+      local bcast_n2=$(( (broadcast_addr >> 16) & 0xFF ))
+      local bcast_n3=$(( (broadcast_addr >> 8) & 0xFF ))
+      local bcast_n4=$(( broadcast_addr & 0xFF ))
+
+      local start_ip="$net_n1.$net_n2.$net_n3.$((net_n4 + 10))"
+      local end_ip="$bcast_n1.$bcast_n2.$bcast_n3.$((bcast_n4 - 1))"
+
+      echo -e "  ${GREEN}${start_ip}-${end_ip}${RESET}"
+      echo ""
+      echo -e "${DIM}Example usage:${RESET}"
+      echo -e "  ${CYAN}ipmgr alloc --pool ${start_ip}-${end_ip} --iface ${iface}${RESET}"
+    fi
+  fi
+
+  # Show current allocations from ipmgr
+  local allocated=$(grep "^$iface " "$STATE_FILE" 2>/dev/null)
+  if [ -n "$allocated" ]; then
+    echo ""
+    echo -e "${BOLD}${BLUE}Current ipmgr Allocations:${RESET}"
+    echo ""
+    echo "$allocated" | awk -v cyan="$CYAN" -v reset="$RESET" '{printf "  %s%s%s\n", cyan, $2, reset}'
+    local count=$(echo "$allocated" | wc -l)
+    echo -e "${DIM}  (${count} IP(s) allocated)${RESET}"
+  fi
+
+  echo ""
 }
 
 # Helper: list all allocations grouped by interface
@@ -339,6 +569,16 @@ case "$cmd" in
     ;;
   list-all)
     list_all_ips
+    ;;
+  show-iface)
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --iface) iface=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    [[ -z "$iface" ]] && usage
+    show_iface "$iface"
     ;;
   sync)
     sync_ips

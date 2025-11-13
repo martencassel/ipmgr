@@ -10,6 +10,12 @@
 - Release IPs when no longer needed
 - List allocations per interface or globally
 
+🔍 **Subnet Detection & Validation**
+- Automatically detect interface subnets
+- Validate IPs against interface subnet
+- Suggest appropriate IP pool ranges
+- Prevent subnet misconfigurations
+
 🎨 **Beautiful CLI**
 - Colorful output for better readability
 - Clean, organized layouts
@@ -56,6 +62,9 @@ sudo cp ipmgr /usr/local/bin/
 # Show help
 ipmgr
 
+# Show interface details and get subnet information
+ipmgr show-iface --iface docker0
+
 # Allocate next free IP from a pool
 ipmgr alloc --pool 192.168.1.10-192.168.1.20 --iface eth0
 
@@ -76,6 +85,56 @@ eval $(ipmgr render-env --iface eth0 --prefix MYAPP)
 ```
 
 ## Examples
+
+### Discovering Interface Subnets
+
+Before allocating IPs, check what subnet is configured on your interface:
+
+```bash
+$ ipmgr show-iface --iface docker0
+
+  Interface Details: docker0
+
+Status: UP
+
+Configured Subnets:
+
+  172.17.0.1/16 (scope: global)
+  ├─ Network:   172.17.0.0
+  ├─ Broadcast: 172.17.255.255
+  └─ Usable:    ~65534 hosts
+
+Suggested Pool Range:
+
+  172.17.0.10-172.17.255.254
+
+Example usage:
+  ipmgr alloc --pool 172.17.0.10-172.17.255.254 --iface docker0
+```
+
+This command shows:
+- Interface status (UP/DOWN)
+- All configured subnets with CIDR notation
+- Network and broadcast addresses
+- Number of usable hosts
+- **Suggested pool range** that's safe to use
+
+### Automatic Subnet Validation
+
+ipmgr automatically validates that IPs are in the correct subnet:
+
+```bash
+# Try to add an IP from the wrong subnet
+$ ipmgr add 192.168.1.100 --iface docker0
+✗ IP 192.168.1.100 is not in the subnet of docker0
+
+Interface subnet: 172.17.0.1/16
+Suggested pool:   172.17.0.10-172.17.255.254
+
+# Use the correct subnet
+$ ipmgr add 172.17.0.50 --iface docker0
+✓ Allocated 172.17.0.50 on docker0
+```
 
 ### Allocating IPs from a Pool
 
@@ -185,6 +244,21 @@ If you get permission errors, ensure:
 If you get "Cannot find device" errors:
 - Verify the network interface exists: `ip link show`
 - Use the correct interface name (e.g., `eth0`, `enp0s3`, `docker0`)
+
+### Wrong Subnet Error
+
+If you see "IP is not in the subnet" error:
+
+```bash
+✗ IP 192.168.1.100 is not in the subnet of docker0
+
+Interface subnet: 172.17.0.1/16
+Suggested pool:   172.17.0.10-172.17.255.254
+```
+
+**Solution**: Use `ipmgr show-iface --iface <interface>` to see the correct subnet and use IPs from that range.
+
+**Why this happens**: Each network interface has a configured subnet (e.g., `172.17.0.0/16`). You can only add IPs that belong to that subnet. The tool automatically validates this and suggests the correct range.
 
 ### IPs Not Persisting
 
