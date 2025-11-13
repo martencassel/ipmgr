@@ -1,0 +1,14 @@
+# ipmgr configuration file
+# Generated from current state on Thu Nov 13 12:38:46 PM CET 2025
+
+interfaces:
+  - name: docker0
+    ips:
+      - 192.168.1.100
+      - 172.17.0.10
+      - 172.17.0.11
+      - 172.17.0.12
+      - 172.17.0.13
+  - name: eth0
+    ips:
+      - 192.168.1.10

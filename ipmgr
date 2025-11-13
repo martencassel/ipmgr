@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 STATE_FILE="$HOME/.ipmgr_state"
+CONFIG_FILE="./ipmgr.yaml"
 
 # Colors
 RESET='\033[0m'
@@ -18,6 +19,316 @@ BG_GREEN='\033[42m'
 
 # Ensure state file exists
 touch "$STATE_FILE"
+
+# Helper: check if yq is available
+check_yq() {
+  if ! command -v yq &>/dev/null; then
+    echo -e "${RED}✗${RESET} yq is required for YAML config files"
+    echo -e "${DIM}Install with:${RESET}"
+    echo -e "  ${CYAN}brew install yq${RESET} (macOS)"
+    echo -e "  ${CYAN}snap install yq${RESET} (Linux)"
+    echo -e "  ${CYAN}wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq${RESET}"
+    exit 1
+  fi
+}
+
+# Helper: parse YAML config and apply IPs
+apply_config() {
+  local config_file=${1:-$CONFIG_FILE}
+
+  if [ ! -f "$config_file" ]; then
+    echo -e "${RED}✗${RESET} Config file not found: ${YELLOW}${config_file}${RESET}"
+    exit 1
+  fi
+
+  check_yq
+
+  echo -e "${BOLD}${BLUE}Applying configuration from ${YELLOW}${config_file}${RESET}"
+  echo ""
+
+  # Read interfaces from YAML
+  local iface_count=$(yq eval '.interfaces | length' "$config_file")
+
+  if [ "$iface_count" -eq 0 ]; then
+    echo -e "${YELLOW}⚠${RESET} No interfaces defined in config"
+    exit 0
+  fi
+
+  local applied=0
+  local skipped=0
+  local failed=0
+
+  # Process each interface
+  for ((i=0; i<iface_count; i++)); do
+    local iface=$(yq eval ".interfaces[$i].name" "$config_file")
+    local ip_count=$(yq eval ".interfaces[$i].ips | length" "$config_file")
+
+    echo -e "${BOLD}${BLUE}Interface: ${YELLOW}${iface}${RESET}"
+
+    # Validate interface exists
+    if ! ip link show "$iface" &>/dev/null; then
+      echo -e "  ${RED}✗${RESET} Interface does not exist, skipping"
+      failed=$((failed + ip_count))
+      echo ""
+      continue
+    fi
+
+    # Process each IP
+    for ((j=0; j<ip_count; j++)); do
+      local ip=$(yq eval ".interfaces[$i].ips[$j]" "$config_file")
+
+      # Check if already allocated
+      if grep -q "^$iface $ip$" "$STATE_FILE"; then
+        echo -e "  ${DIM}○${RESET} ${CYAN}${ip}${RESET} ${DIM}(already allocated)${RESET}"
+        skipped=$((skipped+1))
+      else
+        # Try to add IP
+        if sudo ip addr add "$ip/32" dev "$iface" 2>/dev/null; then
+          echo "$iface $ip" >> "$STATE_FILE"
+          echo -e "  ${GREEN}✓${RESET} ${CYAN}${ip}${RESET} allocated"
+          applied=$((applied+1))
+        else
+          echo -e "  ${RED}✗${RESET} ${CYAN}${ip}${RESET} failed to allocate"
+          failed=$((failed+1))
+        fi
+      fi
+    done
+    echo ""
+  done
+
+  # Summary
+  echo -e "${DIM}═══════════════════════════════${RESET}"
+  echo -e "${BOLD}Summary:${RESET} ${GREEN}${applied}${RESET} applied, ${YELLOW}${skipped}${RESET} skipped, ${RED}${failed}${RESET} failed"
+  echo ""
+}
+
+# Helper: generate YAML config from current state
+generate_config() {
+  local config_file=${1:-$CONFIG_FILE}
+
+  if [ -f "$config_file" ]; then
+    echo -e "${YELLOW}⚠${RESET} Config file already exists: ${YELLOW}${config_file}${RESET}"
+    read -p "Overwrite? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      echo -e "${DIM}Cancelled${RESET}"
+      exit 0
+    fi
+  fi
+
+  if [ ! -s "$STATE_FILE" ]; then
+    echo -e "${YELLOW}⚠${RESET} No allocations found in state file"
+    echo -e "${DIM}Creating empty config template...${RESET}"
+    cat > "$config_file" << 'EOF'
+# ipmgr configuration file
+# Define desired IP allocations per interface
+
+interfaces:
+  - name: eth0
+    ips:
+      - 192.168.1.10
+      - 192.168.1.11
+
+  # - name: docker0
+  #   ips:
+  #     - 172.17.0.10
+  #     - 172.17.0.11
+EOF
+    echo -e "${GREEN}✓${RESET} Created template config: ${CYAN}${config_file}${RESET}"
+    return
+  fi
+
+  # Generate YAML from state file
+  {
+    echo "# ipmgr configuration file"
+    echo "# Generated from current state on $(date)"
+    echo ""
+    echo "interfaces:"
+
+    # Get unique interfaces
+    local ifaces=$(awk '{print $1}' "$STATE_FILE" | sort -u)
+
+    while IFS= read -r iface; do
+      echo "  - name: $iface"
+      echo "    ips:"
+
+      grep "^$iface " "$STATE_FILE" | while read -r _ ip; do
+        echo "      - $ip"
+      done
+    done <<< "$ifaces"
+  } > "$config_file"
+
+  echo -e "${GREEN}✓${RESET} Generated config: ${CYAN}${config_file}${RESET}"
+
+  # Show summary
+  local iface_count=$(echo "$ifaces" | wc -l)
+  local ip_count=$(wc -l < "$STATE_FILE")
+  echo -e "${DIM}  ${iface_count} interface(s), ${ip_count} IP(s)${RESET}"
+}
+
+# Helper: validate YAML config file
+validate_config() {
+  local config_file=${1:-$CONFIG_FILE}
+
+  if [ ! -f "$config_file" ]; then
+    echo -e "${RED}✗${RESET} Config file not found: ${YELLOW}${config_file}${RESET}"
+    exit 1
+  fi
+
+  check_yq
+
+  echo -e "${BOLD}${BLUE}Validating ${YELLOW}${config_file}${RESET}"
+  echo ""
+
+  # Check YAML syntax
+  if ! yq eval '.' "$config_file" >/dev/null 2>&1; then
+    echo -e "${RED}✗${RESET} Invalid YAML syntax"
+    exit 1
+  fi
+
+  echo -e "${GREEN}✓${RESET} YAML syntax valid"
+
+  # Check structure
+  local iface_count=$(yq eval '.interfaces | length' "$config_file")
+
+  if [ "$iface_count" -eq 0 ]; then
+    echo -e "${YELLOW}⚠${RESET} No interfaces defined"
+    exit 0
+  fi
+
+  echo -e "${GREEN}✓${RESET} Found ${CYAN}${iface_count}${RESET} interface(s)"
+  echo ""
+
+  local total_ips=0
+  local issues=0
+
+  # Validate each interface
+  for ((i=0; i<iface_count; i++)); do
+    local iface=$(yq eval ".interfaces[$i].name" "$config_file")
+    local ip_count=$(yq eval ".interfaces[$i].ips | length" "$config_file")
+    total_ips=$((total_ips + ip_count))
+
+    echo -e "${BOLD}${BLUE}Interface: ${YELLOW}${iface}${RESET}"
+
+    # Check if interface exists
+    if ! ip link show "$iface" &>/dev/null; then
+      echo -e "  ${RED}✗${RESET} Interface does not exist"
+      issues=$((issues+1))
+    else
+      echo -e "  ${GREEN}✓${RESET} Interface exists"
+    fi
+
+    # Validate IPs
+    echo -e "  ${CYAN}${ip_count}${RESET} IP(s) defined"
+
+    for ((j=0; j<ip_count; j++)); do
+      local ip=$(yq eval ".interfaces[$i].ips[$j]" "$config_file")
+
+      # Basic IP format validation
+      if [[ ! $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        echo -e "    ${RED}✗${RESET} Invalid IP format: ${CYAN}${ip}${RESET}"
+        issues=$((issues+1))
+      fi
+    done
+    echo ""
+  done
+
+  # Summary
+  echo -e "${DIM}═══════════════════════════════${RESET}"
+  if [ "$issues" -eq 0 ]; then
+    echo -e "${BOLD}${GREEN}✓ Validation passed${RESET}"
+    echo -e "  ${CYAN}${iface_count}${RESET} interface(s), ${CYAN}${total_ips}${RESET} IP(s) defined"
+  else
+    echo -e "${BOLD}${RED}✗ Validation failed${RESET}"
+    echo -e "  ${RED}${issues}${RESET} issue(s) found"
+    exit 1
+  fi
+  echo ""
+}
+
+# Helper: show diff between config and current state
+diff_config() {
+  local config_file=${1:-$CONFIG_FILE}
+
+  if [ ! -f "$config_file" ]; then
+    echo -e "${RED}✗${RESET} Config file not found: ${YELLOW}${config_file}${RESET}"
+    exit 1
+  fi
+
+  check_yq
+
+  echo -e "${BOLD}${BLUE}Configuration Diff${RESET}"
+  echo -e "${DIM}Shows what would change if config is applied${RESET}"
+  echo ""
+
+  local iface_count=$(yq eval '.interfaces | length' "$config_file")
+  local to_add=0
+  local already_present=0
+  local to_remove=0
+
+  # Check what would be added
+  for ((i=0; i<iface_count; i++)); do
+    local iface=$(yq eval ".interfaces[$i].name" "$config_file")
+    local ip_count=$(yq eval ".interfaces[$i].ips | length" "$config_file")
+
+    for ((j=0; j<ip_count; j++)); do
+      local ip=$(yq eval ".interfaces[$i].ips[$j]" "$config_file")
+
+      if grep -q "^$iface $ip$" "$STATE_FILE"; then
+        already_present=$((already_present+1))
+      else
+        if [ "$to_add" -eq 0 ]; then
+          echo -e "${BOLD}${GREEN}To be added:${RESET}"
+        fi
+        echo -e "  ${GREEN}+${RESET} ${YELLOW}${iface}${RESET} ${CYAN}${ip}${RESET}"
+        to_add=$((to_add+1))
+      fi
+    done
+  done
+
+  if [ "$to_add" -gt 0 ]; then
+    echo ""
+  fi
+
+  # Check what would be removed (IPs in state but not in config)
+  while read -r iface ip; do
+    # Check if this IP is in the config
+    local found=false
+    for ((i=0; i<iface_count; i++)); do
+      local cfg_iface=$(yq eval ".interfaces[$i].name" "$config_file")
+      if [ "$cfg_iface" = "$iface" ]; then
+        local ip_count=$(yq eval ".interfaces[$i].ips | length" "$config_file")
+        for ((j=0; j<ip_count; j++)); do
+          local cfg_ip=$(yq eval ".interfaces[$i].ips[$j]" "$config_file")
+          if [ "$cfg_ip" = "$ip" ]; then
+            found=true
+            break 2
+          fi
+        done
+      fi
+    done
+
+    if [ "$found" = false ]; then
+      if [ "$to_remove" -eq 0 ]; then
+        echo -e "${BOLD}${YELLOW}Not in config (would remain):${RESET}"
+      fi
+      echo -e "  ${DIM}○${RESET} ${YELLOW}${iface}${RESET} ${CYAN}${ip}${RESET}"
+      to_remove=$((to_remove+1))
+    fi
+  done < "$STATE_FILE"
+
+  if [ "$to_remove" -gt 0 ]; then
+    echo ""
+  fi
+
+  # Summary
+  echo -e "${DIM}═══════════════════════════════${RESET}"
+  echo -e "${BOLD}Summary:${RESET}"
+  echo -e "  ${GREEN}${to_add}${RESET} to be added"
+  echo -e "  ${CYAN}${already_present}${RESET} already present"
+  echo -e "  ${YELLOW}${to_remove}${RESET} not in config"
+  echo ""
+}
 
 # Helper: validate interface exists
 validate_iface() {
@@ -150,6 +461,19 @@ usage() {
   echo -e ""
   echo -e "  ${GREEN}cleanup${RESET}         Remove all allocations and clear state file"
   echo -e ""
+  echo -e "${BOLD}${BLUE}DECLARATIVE CONFIG:${RESET}"
+  echo -e "  ${GREEN}apply${RESET}           Apply IP allocations from YAML config file"
+  echo -e "                  ${CYAN}--config${RESET} ${YELLOW}<file>${RESET}   Config file (default: ./ipmgr.yaml)"
+  echo -e ""
+  echo -e "  ${GREEN}generate${RESET}        Generate YAML config from current state"
+  echo -e "                  ${CYAN}--config${RESET} ${YELLOW}<file>${RESET}   Output file (default: ./ipmgr.yaml)"
+  echo -e ""
+  echo -e "  ${GREEN}validate${RESET}        Validate YAML config file syntax and structure"
+  echo -e "                  ${CYAN}--config${RESET} ${YELLOW}<file>${RESET}   Config file (default: ./ipmgr.yaml)"
+  echo -e ""
+  echo -e "  ${GREEN}diff${RESET}            Show differences between config and current state"
+  echo -e "                  ${CYAN}--config${RESET} ${YELLOW}<file>${RESET}   Config file (default: ./ipmgr.yaml)"
+  echo -e ""
   echo -e "${BOLD}${BLUE}EXAMPLES:${RESET}"
   echo -e "  ${DIM}# Allocate next free IP from pool${RESET}"
   echo -e "  \$ ipmgr alloc --pool 192.168.1.10-192.168.1.20 --iface eth0"
@@ -178,8 +502,18 @@ usage() {
   echo -e "  ${DIM}# Cleanup everything${RESET}"
   echo -e "  \$ ipmgr cleanup"
   echo -e ""
-  echo -e "${BOLD}${BLUE}STATE FILE:${RESET}"
-  echo -e "  ${DIM}Allocations are stored in:${RESET} ${CYAN}~/.ipmgr_state${RESET}"
+  echo -e "  ${DIM}# Generate config from current state${RESET}"
+  echo -e "  \$ ipmgr generate"
+  echo -e ""
+  echo -e "  ${DIM}# Apply config file${RESET}"
+  echo -e "  \$ ipmgr apply --config ipmgr.yaml"
+  echo -e ""
+  echo -e "  ${DIM}# Show what would change${RESET}"
+  echo -e "  \$ ipmgr diff"
+  echo -e ""
+  echo -e "${BOLD}${BLUE}FILES:${RESET}"
+  echo -e "  ${DIM}Config file:${RESET} ${CYAN}./ipmgr.yaml${RESET}"
+  echo -e "  ${DIM}State file:${RESET} ${CYAN}~/.ipmgr_state${RESET}"
   echo -e ""
   exit 1
 }
@@ -607,6 +941,46 @@ case "$cmd" in
     done
     [[ -z "$iface" ]] && usage
     render_env "$iface" "$prefix"
+    ;;
+  apply)
+    config_file="$CONFIG_FILE"
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --config) config_file=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    apply_config "$config_file"
+    ;;
+  generate)
+    config_file="$CONFIG_FILE"
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --config) config_file=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    generate_config "$config_file"
+    ;;
+  validate)
+    config_file="$CONFIG_FILE"
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --config) config_file=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    validate_config "$config_file"
+    ;;
+  diff)
+    config_file="$CONFIG_FILE"
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        --config) config_file=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    diff_config "$config_file"
     ;;
   *)
     usage
